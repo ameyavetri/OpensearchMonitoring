@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Opensearch 2.11.x version
+
+Parameters:
+  MyInstanceType:
+    Description: Select the ec2 instance type from list
+    Type: String      
+    Default: t2.large
+    AllowedValues: 
+      - t2.large
+      - c5.large
+  MyKeyName:
+    Description: Select the key name from the list
+    Type: AWS::EC2::KeyPair::KeyName
+  UseCustomSecurityGroup:
+    Type: String
+    Default: 'No'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Description: Specify 'Yes' to use your own security group. Otherwise, a default one will be created.
+  CustomSecurityGroupId:
+    Type: String
+    Default: ''
+    Description: ID of the custom security group (required if UseCustomSecurityGroup is 'Yes').
+Conditions:
+  CreateDefaultSecurityGroup: !Equals [!Ref UseCustomSecurityGroup, 'No']
+Resources: 
+  OSEC2Instance:  
+    Type: 'AWS::EC2::Instance'
+    Properties: 
+      ImageId: ami-0fe6c9864169f4e41
+      InstanceType: !Ref MyInstanceType
+      KeyName: !Ref MyKeyName
+      SecurityGroupIds:
+        - !If [CreateDefaultSecurityGroup, !Ref DefaultSecurityGroup, !Ref CustomSecurityGroupId]
+      UserData: 
+        Fn::Base64: |
+          #!/bin/bash
+          sudo useradd ameya1
+          echo "ameya1:Ameya@123" | sudo chpasswd
+          echo "ameya1  ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
+          sudo mkdir -p /home/ameya1
+          sudo chown ameya1:ameya1 /home/ameya1
+          sudo mkdir -p /opt/opensearch
+          sudo mkdir -p /opt/opensearch-dashboard
+          sudo chown ameya1:ameya1 /opt/opensearch
+          sudo chown ameya1:ameya1 /opt/opensearch-dashboard
+          # Wait for the EBS volume to be attached
+          while [ ! -e /dev/sdh ]; do echo Waiting for EBS volume to attach; sleep 5; done
+          # Create filesystem on the EBS volume
+          sudo mkfs -t ext4 /dev/sdh
+          # Create a mount point
+          sudo mkdir -p /mnt/ebs-volume
+          # Mount the EBS volume
+          sudo mount /dev/sdh /mnt/ebs-volume
+          # Add an entry to /etc/fstab to auto-mount the volume on reboot
+          echo '/dev/sdh /mnt/ebs-volume ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab
+          sudo curl -SL https://artifacts.opensearch.org/releases/bundle/opensearch/2.x/opensearch-2.x.repo -o /etc/yum.repos.d/opensearch-2.x.repo
+          sudo yum clean all
+          sudo yum repolist
+          sudo yum install -y 'opensearch-2.11.1'
+          sudo systemctl start opensearch
+          sudo systemctl status opensearch
+          if [ -f "/etc/opensearch/opensearch.yml" ]; then
+              if grep -q "network.host:" "/etc/opensearch/opensearch.yml"; then
+                  # Update the existing line
+                  sudo sed -i "s/#network.host:.*/network.host: 0.0.0.0/" "/etc/opensearch/opensearch.yml"
+              else
+                  # Add the line if it doesn't exist
+                  echo "network.host: 0.0.0.0" | sudo tee -a "/etc/opensearch/opensearch.yml" > /dev/null
+              fi
+              if grep -q "discovery.type:" "/etc/opensearch/opensearch.yml"; then
+                  sudo sed -i "s/discovery.type:.*/discovery.type: single-node/" "/etc/opensearch/opensearch.yml"
+              else
+                  echo "discovery.type: single-node" | sudo tee -a "/etc/opensearch/opensearch.yml" > /dev/null
+              fi
+              if grep -q "plugins.security.disabled:" "/etc/opensearch/opensearch.yml"; then
+                  sudo sed -i "s/plugins.security.disabled:.*/plugins.security.disabled: false/" "/etc/opensearch/opensearch.yml"
+              else
+                  echo "plugins.security.disabled: false" | sudo tee -a "/etc/opensearch/opensearch.yml" > /dev/null
+              fi
+              echo "Configuration updated successfully."
+          else
+              echo "Error: opensearch.yml not found at /etc/opensearch/opensearch.yml"
+          fi
+          sudo systemctl restart opensearch
+          # Configure OpenSearch to use the EBS volume for data storage
+          sudo mkdir -p /mnt/ebs-volume/opensearch-data
+          sudo chown opensearch:opensearch /mnt/ebs-volume/opensearch-data
+          sudo sed -i "s/path.data:.*/path.data: \/mnt\/ebs-volume\/opensearch-data/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/PasswordAuthentication.*/PasswordAuthentication yes/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/#Port.*/Port 22/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/#http.port:.*/http.port: 9200/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/#ListenAddress.*/#ListenAddress 0.0.0.0/" "/etc/ssh/sshd_config"
+          sudo sed -i "/plugins.security.authcz.admin_dn:/{N;s/.*/ /;N;s/.*/ /}" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/-Xms1g/-Xms4g/" "/etc/opensearch/jvm.options"
+          sudo sed -i "s/-Xmx1g/-Xmx4g/" "/etc/opensearch/jvm.options"
+          sudo systemctl restart sshd
+          cd /etc/opensearch
+          sudo rm -f *pem
+          sudo openssl genrsa -out root-ca-key.pem 2048
+          sudo openssl req -new -x509 -sha256 -key root-ca-key.pem -subj "/C=CA/ST=ONTARIO/L=TORONTO/O=ORG/OU=UNIT/CN=ROOT" -out root-ca.pem -days 730
+          sudo openssl genrsa -out admin-key-temp.pem 2048
+          sudo openssl pkcs8 -inform PEM -outform PEM -in admin-key-temp.pem -topk8 -nocrypt -v1 PBE-SHA1-3DES -out admin-key.pem
+          sudo openssl req -new -key admin-key.pem -subj "/C=CA/ST=ONTARIO/L=TORONTO/O=ORG/OU=UNIT/CN=A" -out admin.csr
+          sudo openssl x509 -req -in admin.csr -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial -sha256 -out admin.pem -days 730
+          sudo openssl genrsa -out node1-key-temp.pem 2048
+          sudo openssl pkcs8 -inform PEM -outform PEM -in node1-key-temp.pem -topk8 -nocrypt -v1 PBE-SHA1-3DES -out node1-key.pem
+          sudo openssl req -new -key node1-key.pem -subj "/C=CA/ST=ONTARIO/L=TORONTO/O=ORG/OU=UNIT/CN=node1.dns.a-record" -out node1.csr
+          sudo sh -c 'echo subjectAltName=DNS:node1.dns.a-record > node1.ext'
+          sudo openssl x509 -req -in node1.csr -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial -sha256 -out node1.pem -days 730 -extfile node1.ext
+          sudo rm -f *temp.pem *csr *ext
+          sudo chown opensearch:opensearch admin-key.pem admin.pem node1-key.pem node1.pem root-ca-key.pem root-ca.pem root-ca.srl
+          sudo sed -i "s/plugins.security.ssl.transport.pemcert_filepath:.*/plugins.security.ssl.transport.pemcert_filepath: \/etc\/opensearch\/node1.pem/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/plugins.security.ssl.transport.pemkey_filepath:.*/plugins.security.ssl.transport.pemkey_filepath: \/etc\/opensearch\/node1-key.pem/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/plugins.security.ssl.transport.pemtrustedcas_filepath:.*/plugins.security.ssl.transport.pemtrustedcas_filepath: \/etc\/opensearch\/root-ca.pem/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/plugins.security.ssl.http.enabled:.*/plugins.security.ssl.http.enabled: true/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/plugins.security.ssl.http.pemcert_filepath:.*/plugins.security.ssl.http.pemcert_filepath: \/etc\/opensearch\/node1.pem/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/plugins.security.ssl.http.pemkey_filepath:.*/plugins.security.ssl.http.pemkey_filepath: \/etc\/opensearch\/node1-key.pem/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/plugins.security.ssl.http.pemtrustedcas_filepath:.*/plugins.security.ssl.http.pemtrustedcas_filepath: \/etc\/opensearch\/root-ca.pem/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/plugins.security.allow_default_init_securityindex:.*/plugins.security.allow_default_init_securityindex: true/" "/etc/opensearch/opensearch.yml"
+          echo "plugins.security.authcz.admin_dn:" | sudo tee -a /etc/opensearch/opensearch.yml
+          echo "  - CN=A,OU=UNIT,O=ORG,L=TORONTO,ST=ONTARIO,C=CA" | sudo tee -a /etc/opensearch/opensearch.yml
+          echo "plugins.security.nodes_dn:" | sudo tee -a /etc/opensearch/opensearch.yml
+          echo "  - CN=node1.dns.a-record,OU=UNIT,O=ORG,L=TORONTO,ST=ONTARIO,C=CA" | sudo tee -a /etc/opensearch/opensearch.yml
+          sudo cp /etc/opensearch/root-ca.pem /etc/pki/ca-trust/source/anchors/
+          sudo update-ca-trust
+          sudo systemctl restart opensearch
+          cd /usr/share/opensearch/plugins/opensearch-security/tools
+          OPENSEARCH_JAVA_HOME=/usr/share/opensearch/jdk ./securityadmin.sh -cd /etc/opensearch/opensearch-security/ -cacert /etc/opensearch/root-ca.pem -cert /etc/opensearch/admin.pem -key /etc/opensearch/admin-key.pem -icl -nhnv
+          sudo curl -SL https://artifacts.opensearch.org/releases/bundle/opensearch-dashboards/2.x/opensearch-dashboards-2.x.repo -o /etc/yum.repos.d/opensearch-dashboards-2.x.repo
+          sudo yum repolist
+          sudo yum clean all
+          sudo yum install -y 'opensearch-dashboards-2.11.1'
+          cd /etc/opensearch-dashboards/
+          if [ -f "/etc/opensearch-dashboards/opensearch_dashboards.yml" ]; then
+              if grep -q "server.host:" "/etc/opensearch/opensearch_dashboards.yml"; then
+                  # Update the existing line
+                  sudo sed -i "s/# server.host:.*/server.host: 0.0.0.0/" "/etc/opensearch-dashboards/opensearch_dashboards.yml"
+              else
+                  # Add the line if it doesn't exist
+                  echo "server.host: 0.0.0.0" | sudo tee -a "/etc/opensearch-dashboards/opensearch_dashboards.yml" > /dev/null
+              if grep -q "server.port:" "/etc/opensearch-dashboards/opensearch_dashboards.yml"; then
+                  # Update the existing line
+                  sudo sed -i "s/# server.port:.*/server.port: 5601/" "/etc/opensearch-dashboards/opensearch_dashboards.yml"
+              else
+                  # Add the line if it doesn't exist
+                  echo "server.port: 5601" | sudo tee -a "/etc/opensearch-dashboards/opensearch_dashboards.yml" > /dev/null
+          else
+              echo "Error: opensearch_dashboards.yml not found at /etc/opensearch-dashboards/opensearch_dashboards.yml"
+          sudo systemctl start opensearch-dashboards
+  DataprepperInstance: 
+    Type: 'AWS::EC2::Instance'
+    Properties: 
+      ImageId: ami-0fe6c9864169f4e41
+      InstanceType: !Ref MyInstanceType
+      KeyName: !Ref MyKeyName
+      SecurityGroupIds:
+        - !If [CreateDefaultSecurityGroup, !Ref DefaultSecurityGroup, !Ref CustomSecurityGroupId]
+      UserData: 
+        Fn::Base64: |
+          #!/bin/bash
+          sudo useradd ameya1
+          # Install AWS CLI
+          yum install -y aws-cli
+          echo "ameya1:Ameya@123" | sudo chpasswd
+          echo "ameya1  ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
+          sudo mkdir -p /home/ameya1
+          sudo chown ameya1:ameya1 /home/ameya1
+          sudo sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/PasswordAuthentication.*/PasswordAuthentication yes/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/#Port.*/Port 22/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/#ListenAddress.*/ListenAddress 0.0.0.0/" "/etc/ssh/sshd_config"
+          sudo systemctl restart sshd
+          sudo yum update
+          sudo yum install -y yum-utils device-mapper-persistent-data lvm2
+          wget https://artifacts.opensearch.org/data-prepper/2.6.1/opensearch-data-prepper-jdk-2.6.1-linux-x64.tar.gz -O /tmp/
+          tar -xvf /tmp/opensearch-data-prepper-jdk-2.6.1-linux-x64.tar.gz --directory /usr/local/bin
+          # Install Docker
+          yum install docker -y
+          systemctl start docker
+          systemctl enable docker
+          # Create a directory for Docker Compose file
+          mkdir -p /opt/datapepper/docker-compose
+          curl -L https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          echo 'version: "3"
+          services:
+            data-prepper:
+              container_name: data-prepper
+              image: opensearchproject/data-prepper:2.0.1
+              volumes:
+                - /opt/datapepper/docker-compose/log_pipeline.yaml:/usr/share/data-prepper/pipelines/log_pipeline.yaml
+              ports:
+                - 2021:2021
+              networks:
+                - opensearch-net
+          networks:
+            opensearch-net:' > /opt/datapepper/docker-compose/docker-compose.yml
+          echo 'log-pipeline:
+            source:
+              http:
+                ssl: false
+            processor:
+              - grok:
+                  match:
+                    log: [ "%{COMMONAPACHELOG}" ]
+            sink:
+              - opensearch:
+                  hosts: [ "https://{OSEC2Instance.PublicIp}:9200" ]
+                  insecure: true
+                  username: admin
+                  password: admin
+                  index: nginx_logs' > /opt/datapepper/docker-compose/log_pipeline.yaml
+          # Start Docker Compose
+          docker-compose  -f /opt/datapepper/docker-compose/docker-compose.yml up -d
+          mkdir -p /opt/fluentbit/docker-compose
+          echo 'version: "3"
+          services:
+            fluent-bit:
+              container_name: fluent-bit
+              image: fluent/fluent-bit
+              volumes:
+                - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf
+                - /var/log/nginx/access.log:/var/log/access.log
+              networks:
+                - opensearch-net
+          networks:
+            opensearch-net:' > /opt/fluentbit/docker-compose/docker-compose.yml
+          echo '[INPUT]
+            name                  tail
+            refresh_interval      5
+            path                  /var/log/access.log
+            read_from_head        true
+          [OUTPUT]
+            Name http
+            Match *
+            Host opensearch.stack.com
+            Port 2021
+            URI /log/ingest
+            Format json' > /opt/fluentbit/ docker-compose/fluent-bit.conf
+          docker-compose  -f /opt/fluentbit/docker-compose/docker-compose.yml up -d
+          # Signal the wait condition
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource DataprepperInstance
+  ApplicationInstance: 
+    Type: 'AWS::EC2::Instance'
+    Properties: 
+      ImageId: ami-0fe6c9864169f4e41
+      InstanceType: !Ref MyInstanceType
+      KeyName: !Ref MyKeyName
+      SecurityGroupIds:
+        - !If [CreateDefaultSecurityGroup, !Ref DefaultSecurityGroup, !Ref CustomSecurityGroupId]
+      UserData: 
+        Fn::Base64: |
+          #!/bin/bash
+          sudo useradd ameya1
+          echo "ameya1:Ameya@123" | sudo chpasswd
+          echo "ameya1  ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
+          sudo mkdir -p /home/ameya1
+          sudo chown ameya1:ameya1 /home/ameya1
+          sudo sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/PasswordAuthentication.*/PasswordAuthentication yes/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/#Port.*/Port 22/" "/etc/ssh/sshd_config"
+          sudo sed -i "s/#ListenAddress.*/ListenAddress 0.0.0.0/" "/etc/ssh/sshd_config"
+          sudo systemctl restart sshd
+          sudo yum update
+          # Install Docker
+          amazon-linux-extras install docker -y
+          systemctl start docker
+          systemctl enable docker
+          # Create a directory for Docker Compose file
+          mkdir -p /opt/docker-compose
+          curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh
+          sudo systemctl start fluent-bit
+  DefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateDefaultSecurityGroup
+    Properties:
+      GroupDescription: Enable SSH and OpenSearch ports- Default security group if not provided by user
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 9200
+          ToPort: 9200
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 9300
+          ToPort: 9300
+          CidrIp: 0.0.0.0/0
+  OSEC2InstanceEIP:
+    Type: 'AWS::EC2::EIP'
+  DataprepperInstanceEIP:
+    Type: 'AWS::EC2::EIP'
+  EIPAssociationOSEC2Instance:
+    Type: 'AWS::EC2::EIPAssociation'
+    Properties:
+      InstanceId: !Ref OSEC2Instance
+      AllocationId: !GetAtt OSEC2InstanceEIP.AllocationId
+  EIPAssociationDataprepperInstance:
+    Type: 'AWS::EC2::EIPAssociation'
+    Properties:
+      InstanceId: !Ref DataprepperInstance
+      AllocationId: !GetAtt DataprepperInstanceEIP.AllocationId
+  MyEBSVolume:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      Size: 100
+      AvailabilityZone: 
+        Fn::GetAtt: 
+          - "OSEC2Instance"
+          - "AvailabilityZone"
+      VolumeType: "gp2"
+  MyVolumeAttachment:
+    Type: 'AWS::EC2::VolumeAttachment'
+    Properties:
+      InstanceId: !Ref OSEC2Instance
+      VolumeId: !Ref MyEBSVolume
+      Device: /dev/sdh
+Outputs:
+  InstanceId:
+    Description: ID of the OpenSearch instance
+    Value: !Ref OSEC2Instance
+  InstancePublicIP:
+    Description: Public IP of the OpenSearch instance
+    Value: !GetAtt OSEC2Instance.PublicIp
