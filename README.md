@@ -13,4 +13,5 @@ What are the traditional or present methods of addressing the problem?
 In the past, engineers typically engaged in manual logins to each individual system and conducted manual analysis. This process was not only laborious but also prone to errors. Moreover, it followed a reactive approach, wherein actions were taken in response to issues as they arose, rather than proactively addressing potential problems.
 Why does the Sample Solution in this document provide a compelling means of addressing the problem relative to traditional solutions?
 The open source Opensearch stack offers a comprehensive solution that possesses remarkable versatility. It serves as a powerful instrument capable of gathering, organizing, and scrutinizing substantial volumes of data originating from diverse origins. By doing so, it furnishes organizations with invaluable insights, empowering them to base their decisions on thorough data analysis, thereby embracing a data-driven approach.
-**** Please wait 15 minutes after Deploy to Access Dashboard URL ****
+
+# **** Please wait 15 minutes after Deploy to Access Dashboard URL ****
