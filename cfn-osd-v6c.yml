@@ -44,44 +44,12 @@ Resources:
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
-          CidrIp: 0.0.0.0/0
           Description: Allow SSH to client host.
-        - IpProtocol: tcp
-          FromPort: 9200
-          ToPort: 9200
-          CidrIp: 0.0.0.0/0
-          Description: Allow OpenSearch ports.
         - IpProtocol: tcp
           FromPort: 5601
           ToPort: 5601
           CidrIp: 0.0.0.0/0
           Description: Allow OpenSearch ports.
-        - IpProtocol: tcp
-          FromPort: 9300
-          ToPort: 9300
-          CidrIp: 0.0.0.0/0
-          Description: Allow OpenSearch ports.
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: Allow HTTPS traffic.
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: Allow HTTP traffic.
-        - IpProtocol: tcp
-          FromPort: 9600
-          ToPort: 9600
-          CidrIp: 0.0.0.0/0
-          Description: Opensearch.
-        - IpProtocol: tcp
-          FromPort: 2021
-          ToPort: 2021
-          CidrIp: 0.0.0.0/0
-          Description: Dataprepper.
-
   OSEC2Instance:
     Type: AWS::EC2::Instance
     Properties:
