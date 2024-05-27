@@ -1,0 +1,446 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  This template deploys an OpenSearch monitoring stack on AWS. It includes provisioning of EC2 instances,
+  security groups, Elastic IPs, and EBS volumes. This setup is designed to provide a robust environment for
+  running OpenSearch and its dashboard for effective monitoring capabilities.
+
+# Parameters allow users to specify options when creating or updating the stack.
+
+Parameters:
+  MyInstanceType:
+    Description: Select the EC2 instance type from the list.
+    Type: String
+    Default: c5.large
+    AllowedValues:
+      - c5.large
+      - t2.xlarge
+      - t2.2xlarge
+  MyKeyName:
+    Description: Select the Key Name.
+    Type: AWS::EC2::KeyPair::KeyName
+  UseCustomSecurityGroup:
+    Description: Select Yes to use a custom security group. Select No to use the default security group.
+    Type: String
+    Default: 'No'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+  CustomSecurityGroupId:
+    Description: Enter the custom security group ID (required if UseCustomSecurityGroup is 'Yes').
+    Type: String
+    Default: ''
+# Conditions are used to control resource creation based on parameter values.
+Conditions:
+  CreateDefaultSecurityGroup: !Equals [!Ref UseCustomSecurityGroup, 'No']
+# Resources are the AWS components that will be created by this template.
+Resources:
+# Custom Security Group configured to allow traffic for OpenSearch and common web traffic.
+  DefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateDefaultSecurityGroup
+    Properties:
+      GroupDescription: Allow SSH to client host and OpenSearch ports - Default security group if not provided by user.
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: Allow SSH to client host.
+        - IpProtocol: tcp
+          FromPort: 9200
+          ToPort: 9200
+          CidrIp: 0.0.0.0/0
+          Description: Allow OpenSearch ports.
+        - IpProtocol: tcp
+          FromPort: 5601
+          ToPort: 5601
+          CidrIp: 0.0.0.0/0
+          Description: Allow OpenSearch ports.
+        - IpProtocol: tcp
+          FromPort: 9300
+          ToPort: 9300
+          CidrIp: 0.0.0.0/0
+          Description: Allow OpenSearch ports.
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS traffic.
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP traffic.
+        - IpProtocol: tcp
+          FromPort: 9600
+          ToPort: 9600
+          CidrIp: 0.0.0.0/0
+          Description: Opensearch.
+        - IpProtocol: tcp
+          FromPort: 2021
+          ToPort: 2021
+          CidrIp: 0.0.0.0/0
+          Description: Dataprepper.
+
+  OSEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0fe6c9864169f4e41
+      InstanceType: !Ref MyInstanceType
+      KeyName: !Ref MyKeyName
+      SecurityGroupIds:
+        - !If 
+          - CreateDefaultSecurityGroup
+          - !Ref DefaultSecurityGroup
+          - !Ref CustomSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: Opensearch-Dashboard-Inc
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          sleep 5
+          useradd -m -s /bin/bash opensearch
+          mkdir /opt/opensearch
+          chown opensearch:opensearch /opt/opensearch
+          cd /opt/opensearch
+          mkdir /opt/opensearch-dashboard
+          chown opensearch:opensearch /opt/opensearch-dashboard
+          cd /opt/opensearch-dashboard
+          # Wait for the EBS volume to be attached
+          while [ ! -b /dev/sdh ]; do
+            sleep 6
+            echo "Waiting for EBS volume to be attached..."
+          done
+          # Check if the EBS volume is attached
+          if [ -b /dev/sdh ]; then
+            echo "EBS volume is attached"
+            # Format the EBS volume if it is not already formatted
+            if ! blkid /dev/sdh; then
+              echo "Formatting EBS volume"
+              sudo mkfs -t ext4 /dev/sdh
+            fi
+            sudo mkdir -p /opt/opensearch-data  # Ensuring the directory exists without failing if it already exists
+            sudo mount /dev/sdh /opt/opensearch-data
+            sudo chown opensearch:opensearch /opt/opensearch-data
+            sudo chmod 755 /opt/opensearch-data
+            # Add the EBS volume to fstab for automatic remounting on reboot
+            echo "/dev/sdh /opt/opensearch-data ext4 defaults 0 0" | sudo tee -a /etc/fstab
+            # Reload the fstab file to mount any newly added entries
+            sudo mount -a
+            # Check if the EBS volume is mounted successfully
+            if mount | grep -q '/opt/opensearch-data'; then
+              echo "EBS volume is mounted successfully"
+            else
+              echo "Failed to mount EBS volume"
+            fi
+          else
+            echo "EBS volume is not attached"
+          fi
+          curl -SL https://artifacts.opensearch.org/releases/bundle/opensearch/2.x/opensearch-2.x.repo -o /etc/yum.repos.d/opensearch-2.x.repo
+          curl -SL https://artifacts.opensearch.org/releases/bundle/opensearch-dashboards/2.x/opensearch-dashboards-2.x.repo -o /etc/yum.repos.d/opensearch-dashboards-2.x.repo
+          yum clean all
+          sleep 10
+          sudo yum install -y 'opensearch-2.11.1'
+          sleep 180
+          sudo yum install -y 'opensearch-dashboards-2.11.1'
+          sleep 180
+          sleep 60
+          systemctl enable opensearch.service
+          systemctl start opensearch.service
+          systemctl enable opensearch-dashboards.service
+          systemctl start opensearch-dashboards.service
+          systemctl status opensearch.service
+          systemctl status opensearch-dashboards.service
+          sleep 60
+          sudo sed -i "s/#network.host:.*/network.host: 0.0.0.0/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/#discovery.type:.*/discovery.type: single-node/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/^path.data:.*/path.data: \/opt\/opensearch-data/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s|^path.logs:.*|path.logs: /opt/opensearch-data/log|" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/^# server.port: 5601/server.port: 5601/" "/etc/opensearch-dashboards/opensearch_dashboards.yml"
+          sudo sed -i "s/^# server.host:.*/server.host: 0.0.0.0/" "/etc/opensearch-dashboards/opensearch_dashboards.yml"
+          curl -XPUT "https://localhost:9200/_plugins/_security/api/internalusers/admin" -u admin:admin -k -H "Content-Type: application/json" -d'
+          {
+            "password" : "Admin@123!"
+          }'
+          if [ -f "/etc/opensearch/opensearch.yml" ]; then
+            echo "opensearch.yml file exists"
+            if grep -q "network.host:" "/etc/opensearch/opensearch.yml"; then
+              sudo sed -i "s/#network.host:.*/network.host: 0.0.0.0/" "/etc/opensearch/opensearch.yml"
+            else
+              # Add the line if it doesn't exist
+              echo "network.host: 0.0.0.0" | sudo tee -a "/etc/opensearch/opensearch.yml" > /dev/null
+            fi
+            if grep -q "discovery.type:" "/etc/opensearch/opensearch.yml"; then
+              sudo sed -i "s/#discovery.type:.*/discovery.type: single-node/" "/etc/opensearch/opensearch.yml"
+            else
+              echo "discovery.type: single-node" | sudo tee -a "/etc/opensearch/opensearch.yml" > /dev/null
+              # Add the line if it doesn't exist
+            fi
+            if grep -q "plugins.security.disabled:" "/etc/opensearch/opensearch.yml"; then
+              sudo sed -i "s/#plugins.security.disabled:.*/plugins.security.disabled: false/" "/etc/opensearch/opensearch.yml"
+            else
+              echo "plugins.security.disabled: false" | sudo tee -a "/etc/opensearch/opensearch.yml" > /dev/null
+            fi
+            echo "Configuration updated successfully."
+          else
+            echo "Error: opensearch.yml not found at /etc/opensearch/opensearch.yml"
+          fi
+          systemctl restart opensearch.service
+          systemctl restart opensearch-dashboards.service
+          systemctl status opensearch.service
+          systemctl status opensearch-dashboards.service
+          sleep 100
+          # Configure opensearch to use EBS volume for Data storage
+          if [ -f "/etc/opensearch/opensearch.yml" ]; then
+            echo "opensearch.yml file exists"
+            if grep -q "^path.data:" "/etc/opensearch/opensearch.yml"; then
+              sudo sed -i "s/^path.data:.*/path.data: \/opt\/opensearch-data/" "/etc/opensearch/opensearch.yml"
+            elif grep -q "^#path.data:" "/etc/opensearch/opensearch.yml"; then
+              sudo sed -i "s/^#path.data:.*/path.data: \/opt\/opensearch-data/" "/etc/opensearch/opensearch.yml"
+            else
+              # Add the line if it doesn't exist
+              echo "path.data: /opt/opensearch-data" | sudo tee -a "/etc/opensearch/opensearch.yml" > /dev/null
+            fi 
+            if grep -q "path.logs:" "/etc/opensearch/opensearch.yml"; then
+              sudo sed -i "s/#path.logs:.*/path.logs: /opt/opensearch-data/logs/" "/etc/opensearch/opensearch.yml"
+            else
+              # Add the line if it doesn't exist
+              echo "path.logs: /opt/opensearch-data/logs" | sudo tee -a "/etc/opensearch/opensearch.yml" > /dev/null
+            fi
+            echo "Configuration updated successfully."
+            #systemctl restart opensearch.service
+            #systemctl restart opensearch-dashboards.service
+            sleep 5
+          # Update /etc/ssh/sshd_config to enable password authentication 
+          if grep -q "PasswordAuthentication" "/etc/ssh/sshd_config"; then
+            sudo sed -i "s/PasswordAuthentication no/PasswordAuthentication yes/g" "/etc/ssh/sshd_config"
+            sudo sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" "/etc/ssh/sshd_config"
+            sudo sed -i "s/#Port.*/Port 22/" "/etc/ssh/sshd_config"
+            sudo sed -i "s/#ListenAddress.*/ListenAddress 0.0.0.0/" "/etc/ssh/sshd_config"
+            sudo systemctl restart sshd
+            echo "SSH configuration updated successfully."
+          sudo sed -i "s/#http.port:.*/http.port: 9200/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/#transport.port:.*/transport.port: 9300/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "/plugins.security.authcz.admin_dn:/{N;s/.*/ /;N;s/.*/ /}" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/-Xms1g/-Xms4g/" "/etc/opensearch/jvm.options"
+          sudo sed -i "s/-Xmx1g/-Xmx4g/" "/etc/opensearch/jvm.options"
+          sudo sed -i "s/-Xms1g/-Xms4g/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/-Xmx1g/-Xmx4g/" "/etc/opensearch/opensearch.yml"
+          sudo sed -i "s/-Xms1g/-Xms4g/" "/etc/opensearch/opensearch-dashboards.yml"
+          sudo sed -i "s/-Xmx1g/-Xmx4g/" "/etc/opensearch/opensearch-dashboards.yml"
+          systemctl restart opensearch.service
+          systemctl restart opensearch-dashboards.service
+          systemctl status opensearch.service
+          systemctl status opensearch-dashboards.service
+          sleep 40
+          # Configure Opensearch-Dashboard config file
+          if [ -f "/etc/opensearch-dashboards/opensearch_dashboards.yml" ]; then
+            echo "opensearch_dashboards.yml file exists"
+            if grep -q "^#*server.host:" "/etc/opensearch-dashboards/opensearch_dashboards.yml"; then
+              # Update the existing line
+              sudo sed -i "s/^#*server.host:.*/server.host: 0.0.0.0/" "/etc/opensearch-dashboards/opensearch_dashboards.yml"
+            else
+              # Add the line if it doesn't exist
+              echo "server.host: 0.0.0.0" | sudo tee -a "/etc/opensearch-dashboards/opensearch_dashboards.yml" > /dev/null
+            if grep -q "^#*server.port:" "/etc/opensearch-dashboards/opensearch_dashboards.yml"; then
+              # Update the existing line
+              sudo sed -i "^#*server.port:.*/server.port: 5601/" "/etc/opensearch-dashboards/opensearch_dashboards.yml"
+            else
+              # Add the line if it doesn't exist
+              echo "server.port: 5601" | sudo tee -a "/etc/opensearch-dashboards/opensearch_dashboards.yml" > /dev/null
+          else
+            echo "Error: opensearch_dashboards.yml not found at /etc/opensearch-dashboards/opensearch_dashboards.yml"
+          #sudo sed -i "s/^# server.port: 5601/server.port: 5601/" "/etc/opensearch-dashboards/opensearch_dashboards.yml"
+          #sudo sed -i "s/^# server.host: */server.host: 0.0.0.0/" "/etc/opensearch-dashboards/opensearch_dashboards.yml"
+          systemctl restart opensearch.service
+          systemctl restart opensearch-dashboards.service
+          systemctl status opensearch.service
+          systemctl status opensearch-dashboards.service
+  DataprepperInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0ba76b94f5a31f4ce
+      InstanceType: !Ref MyInstanceType
+      KeyName: !Ref MyKeyName
+      SecurityGroupIds:
+        - !If 
+          - CreateDefaultSecurityGroup
+          - !Ref DefaultSecurityGroup
+          - !Ref CustomSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: Dataprepper-Fluentbit
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          sleep 5
+          yum install wget -y
+          sleep 5
+          useradd -m -s /bin/bash dataprepper
+          mkdir /opt/dataprepper
+          chown dataprepper:dataprepper /opt/dataprepper
+          useradd -m -s /bin/bash fluentbit
+          mkdir /opt/fluentbit
+          chown fluentbit:fluentbit /opt/fluentbit
+          # Update /etc/ssh/sshd_config to enable password authentication 
+          if grep -q "PasswordAuthentication" "/etc/ssh/sshd_config"; then
+            sudo sed -i "s/PasswordAuthentication no/PasswordAuthentication yes/g" "/etc/ssh/sshd_config"
+            sudo sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" "/etc/ssh/sshd_config"
+            sudo sed -i "s/#Port.*/Port 22/" "/etc/ssh/sshd_config"
+            sudo sed -i "s/#ListenAddress.*/ListenAddress 0.0.0.0/" "/etc/ssh/sshd_config"
+            sudo systemctl restart sshd
+            echo "SSH configuration updated successfully."
+          yum update -y
+          sleep 100
+          yum install -y yum-utils device-mapper-persistent-data lvm2
+          sleep 100
+          # Install Docker
+          sudo dnf -y install dnf-plugins-core
+          sleep 100
+          sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+          sudo dnf -y install docker-ce docker-ce-cli containerd.io
+          sleep 100
+          sudo systemctl enable --now docker
+          sudo usermod -aG docker $(whoami)
+          DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+          mkdir -p $DOCKER_CONFIG/cli-plugins
+          curl -SL https://github.com/docker/compose/releases/download/v2.4.1/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose
+          chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+          docker compose version
+          sudo sysctl -w vm.max_map_count=262144
+          sudo sysctl -p
+          systemctl start docker
+          sleep 30
+          systemctl enable docker
+          usermod -a -G docker fedora
+          usermod -a -G docker fluentbit
+          usermod -a -G docker dataprepper
+          # Create a directory for Docker Compose file
+          mkdir -p /opt/dataprepper/docker-compose
+          mkdir -p /opt/fluentbit/docker-compose
+          # Download Docker Compose file
+          curl -L https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose
+          sleep 50
+          chmod +x /usr/local/bin/docker-compose
+          echo '
+          version: "3"
+          services:
+            data-prepper:
+              container_name: data-prepper
+              image: opensearchproject/data-prepper:2.0.1
+              volumes:
+                - ./log_pipeline.yaml:/usr/share/data-prepper/pipelines/log_pipeline.yaml
+              ports:
+                - "2021:2021"
+              networks:
+                - opensearch-net
+          networks:
+            opensearch-net: ' > /opt/dataprepper/docker-compose/docker-compose.yml
+          echo '
+            log-pipeline:
+              source:
+                http:
+                  ssl: false
+              processor:
+                - grok:
+                  match:
+                    log: [ "%{COMMONAPACHELOG}" ]
+              sink:
+                - opensearch:
+                  hosts: [ "https://{OSEC2Instance.PublicIp}:9200" ]
+                  insecure: true
+                  username: admin
+                  password: admin
+                  index: nginx_logs'> /opt/dataprepper/docker-compose/log_pipeline.yaml
+          # Start Docker Compose
+          cd /opt/dataprepper/docker-compose
+          docker-compose up -d
+          sleep 5
+          #Signal the wait condition
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource DataprepperInstance
+          # Install fluentbit
+          cd /opt/fluentbit/docker-compose
+          echo '
+          version: "3"
+          services:
+            fluent-bit:
+              container_name: fluent-bit
+              image: fluent/fluent-bit
+              volumes:
+                - ./fluent-bit.conf:/etc/fluent-bit.conf
+                - /var/log/nginx/access.log:/var/log/access.log
+              networks:
+                - opensearch-net
+          networks:
+            opensearch-net: ' > /opt/fluentbit/docker-compose/docker-compose.yml
+          echo '
+          [INPUT]
+            name                  tail
+            refresh_interval      5
+            path                  /var/log/access.log
+            read_from_head        true
+          [OUTPUT]
+            Name http
+            Match *
+            Host  127.0.0.1
+            Port 2021
+            URI /log/ingest
+            Format json' > /opt/fluentbit/docker-compose/fluent-bit.conf
+  MyEBSVolume:
+  # Define an EBS Volume to provide durable block-level storage for use with EC2 instances.
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 100
+      AvailabilityZone: 
+        Fn::GetAtt: 
+          - "OSEC2Instance"
+          - "AvailabilityZone"
+      VolumeType: gp2
+  MyEBSVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    DependsOn: OSEC2Instance  # Ensures OSEC2Instance is created first
+    Properties:
+      InstanceId: !Ref OSEC2Instance
+      VolumeId: !Ref MyEBSVolume
+      Device: /dev/sdh
+      #DeleteOnTermination: true
+  # Allocate an Elastic IP for the primary EC2 instance to provide a static, public IP address.
+  MyElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  DataprepperInstanceEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  MyElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref OSEC2Instance
+      AllocationId: !GetAtt MyElasticIP.AllocationId
+  DataprepperInstanceEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref DataprepperInstance
+      AllocationId: !GetAtt DataprepperInstanceEIP.AllocationId
+Outputs:
+  OSEC2InstanceEIP:
+    Description: "Elastic IP address of the OSEC2Instance."
+    Value: !GetAtt MyElasticIP.PublicIp
+    Export:
+      Name: !Sub "${AWS::StackName}-OSEC2InstanceEIP"
+
+  DataprepperInstanceEIP:
+    Description: "Elastic IP address of the DataprepperInstance."
+    Value: !GetAtt DataprepperInstanceEIP.PublicIp
+    Export:
+      Name: !Sub "${AWS::StackName}-DataprepperInstanceEIP"
+
+  OpenSearchURL:
+    Description: "URL to access OpenSearch on OSEC2Instance."
+    Value: !Sub "http://${MyElasticIP.PublicIp}:5601"
+    Export:
+      Name: !Sub "${AWS::StackName}-OpenSearchURL"
